@@ -5,21 +5,24 @@
 ```
 platform-team-administration/
 ├── .circleci/
+│   └── config.yml              # CircleCI pipeline with preview, update, rollback workflows
 ├── .env                        # Local secrets — NOT committed
 ├── .env.example                # Committed — shows required env vars
+├── .git-hooks/
+│   └── commit-msg              # Enforces Conventional Commits format
 ├── .gitignore
-├── __main__.py                 # Pulumi entry point (currently empty)
+├── __main__.py                 # Pulumi entry point — defines GitHub repos with protect=True
 ├── Pulumi.yaml                 # Pulumi project config (uv toolchain)
 ├── pyproject.toml              # Python deps + pytest config
 ├── uv.lock
 ├── config/
-│   └── platform_team_values.yaml   # GitHub repos to create
+│   └── platform_team_values.yaml   # GitHub org, repos, and members config
 ├── modules/
 │   └── github/
 ├── scripts/
-│   ├── pulumi_repo_create.py   # One-time script to bootstrap GitHub repos
-│   ├── sync_bw_secrets.py      # One-time script to push secrets to Bitwarden
-│   └── platform_team_values.yaml  # (moved to config/)
+│   ├── install-githooks.sh     # Copies .git-hooks/ into .git/hooks/ for local use
+│   ├── pulumi_repo_create.py   # Bootstrap script — creates repos, invites members, sets branch protection
+│   └── sync_bw_secrets.py      # Pushes secrets-setup/*.json to Bitwarden vault
 ├── secrets-setup/
 │   ├── github_secrets.json         # Real secrets — NOT committed
 │   └── github_secrets.json_example # Committed — shows Bitwarden item structure
@@ -34,129 +37,131 @@ platform-team-administration/
 BW_CLIENTID=        # Bitwarden API key client ID
 BW_CLIENTSECRET=    # Bitwarden API key client secret
 BW_PASSWORD=        # Bitwarden master password
-GITHUB_TOKEN=       # Not used — token comes from Bitwarden at runtime
-GITHUB_OWNER=       # Not used — owner comes from Bitwarden at runtime
 ```
+
+## GitHub Org
+
+- **Org slug:** `VHRAZA`
+- **Repos pushed to:** `github.com/VHRAZA/platform-team-admin` (this codebase)
+- `platform-team-admin` repo is on `main` branch, pushed and tagged `v0.1.0`
 
 ## Secret Store Architecture
 
-Bitwarden is the secret store. GitHub credentials are stored as a Bitwarden Login item with custom fields — not in `.env` or Pulumi config.
+Bitwarden is the secret store. GitHub token is stored in `login.password` of the "GitHub Secrets" item.
 
 ```
 .env (Bitwarden credentials)
   → bw unlock → BW_SESSION
     → sync_bw_secrets.py pushes github_secrets.json → Bitwarden vault
-      → pulumi_repo_create.py fetches token + owner from Bitwarden
-        → GitHub API creates repositories
+      → pulumi_repo_create.py fetches token from Bitwarden
+        → GitHub API creates repos, invites members, sets branch protection
 ```
 
 ### Bitwarden Item Structure (github_secrets.json)
+
+Token goes in `login.password` ONLY. The `fields` array is not used by the script.
 
 ```json
 {
   "type": 1,
   "name": "GitHub Secrets",
-  "notes": "Bitwarden Secrets for Pulumi GitHub provider",
-  "fields": [
-    { "name": "pulumi-github-token", "value": "<ghp_token>", "type": 0 },
-    { "name": "pulumi-github-owner", "value": "<org_name>", "type": 0 }
-  ],
   "login": {
-    "uris": [], "username": null, "password": "add pwd here",
-    "totp": null, "passwordRevisionDate": null
+    "password": "<ghp_classic_pat_token>"
   }
 }
 ```
 
-## Scripts
-
-### sync_bw_secrets.py
-Reads all `*.json` files from `secrets-setup/`, checks if each item exists in
-Bitwarden by name, then creates or updates it.
-
-```bash
-set -o allexport && source .env && set +o allexport
-export BW_SESSION=$(bw unlock --passwordenv BW_PASSWORD --raw)
-uv run scripts/sync_bw_secrets.py
-```
-
-### pulumi_repo_create.py
-One-time bootstrap script. Unlocks Bitwarden, fetches GitHub token and org from
-the vault, then calls the GitHub API to create each repo defined in
-`config/platform_team_values.yaml`.
-
-```bash
-set -o allexport && source .env && set +o allexport
-uv run scripts/pulumi_repo_create.py
-```
-
-### Repos to Create (platform_team_values.yaml)
-
-| Name | Description | Visibility |
-|------|-------------|------------|
-| platform-team-admin | Manage platform team membership and admin artifacts | private |
-| platform-core | Core platform runtime | private |
-| platform-demo-apps | Demo application for testing the platform | private |
-
 ## GitHub Token Requirements
 
-- Type: **Classic PAT** (starts with `ghp_`)
-- Required scope: **`repo`** only
-- Fine-grained PATs (`github_pat_`) require org admin approval — avoid for now
+- Type: **Classic PAT** (`ghp_`)
+- Required scopes: **`repo`** + **`admin:org`**
+- Fine-grained PATs require org admin approval — avoid
 
-## GitHub Repo Creation — RESOLVED
-
-### What was tried and root causes found
-
-1. Initially `pulumi.Config("github").require("token")` was used — failed because
-   Pulumi config was never set. Switched to reading from Bitwarden instead.
-2. Fine-grained PAT (`github_pat_`) was used first — GitHub requires org admin
-   approval for these. Switched to classic PAT (`ghp_`).
-3. `pulumi_repo_create.py` was reading token from custom `fields` array
-   (`get_field(item, "pulumi-github-token")`), but the book/design stores the
-   token in `login.password`. The `fields` array still had placeholder values so
-   the GitHub API always received `"your_github_pat_token"` → 401/403.
-4. Script was hitting `/orgs/{owner}/repos` but this is a personal account — the
-   correct endpoint is `/user/repos` (no owner needed).
-5. Bitwarden local cache issue: `bw get` reads stale cache without a `bw sync`
-   first. Added `bw sync` inside `pulumi_repo_create.py` after `get_bw_session()`.
-
-### Fixes applied to pulumi_repo_create.py
-- Read token from `item["login"]["password"]` instead of custom fields
-- API endpoint changed from `/orgs/{owner}/repos` to `/user/repos`
-- `bw sync` called automatically after `get_bw_session()` before any vault reads
-- Removed `get_field()` helper (no longer needed)
-- Removed debug print line
-
-### Secret structure (github_secrets.json)
-Token goes in `login.password` only. The `fields` array is not used by the script.
-`username`, `totp`, `uris`, `passwordRevisionDate` all left as null/empty.
+## Scripts
 
 ### Working run command
+
 ```bash
 set -o allexport && source .env && set +o allexport
 export BW_SESSION=$(bw unlock --passwordenv BW_PASSWORD --raw)
-uv run scripts/sync_bw_secrets.py
+uv run scripts/sync_bw_secrets.py   # wait for "Done: GitHub Secrets" before proceeding
 uv run scripts/pulumi_repo_create.py
 ```
 
-### Repos created
-- `platform-team-admin`
-- `platform-core`
-- `platform-demo-apps`
+Run scripts separately — do not chain with `&&` as sync can be slow and timing out causes stale token issues.
 
-## Pulumi Setup Notes
+### pulumi_repo_create.py — what it does
 
-- Backend: Pulumi Cloud (ephemeral account created during `pulumi new`)
-- Claim URL was generated — claim at app.pulumi.com before expiry
-- Toolchain: uv (not pip/venv)
-- Stack: not yet initialized (`pulumi stack init dev` needed before `pulumi up`)
-- `__main__.py` is currently empty — Pulumi infrastructure code will go here
+1. Unlocks Bitwarden, syncs vault, fetches GitHub token
+2. Reads `github_org` and member/repo lists from `config/platform_team_values.yaml`
+3. Invites org members by email via `POST /orgs/{org}/invitations`
+4. Creates repos via `POST /orgs/{org}/repos` (skips if already exists, updates visibility)
+5. Initializes each repo with a README.md commit (creates `main` branch)
+6. Sets branch protection on `main` (enforce admins + require signed commits)
 
-## Testing
+### install-githooks.sh
+
+Run once after cloning to activate the commit-msg hook:
 
 ```bash
-uv run pytest          # runs tests/test_stack.py
+bash scripts/install-githooks.sh
 ```
 
-Stop hook runs `uv run pytest` automatically after each session.
+## Repos Created (all public, VHRAZA org)
+
+| Name | Description |
+|------|-------------|
+| platform-team-admin | Manages platform team membership and admin artifacts (this repo) |
+| platform-core | Core platform runtime (empty — Chapter 2 starts here) |
+| platform-demo-apps | Demo application for testing the platform (empty) |
+| platform-extensions | Extensions for the platform (empty) |
+
+Repos are **public** (required for branch protection on free GitHub org plan).
+
+## Org Members
+
+| Username | Email | Role |
+|----------|-------|------|
+| rcodesinjavascript | rcodesinjavascript@gmail.com | member |
+
+## __main__.py — Pulumi Resources
+
+All 4 repos defined as `github.Repository` resources with `protect=True` (prevents `pulumi destroy` from deleting them). Repos must be imported into Pulumi state before `pulumi up`:
+
+```bash
+pulumi stack init dev
+pulumi import github:index/repository:Repository platform-team-admin platform-team-admin
+pulumi import github:index/repository:Repository platform-core platform-core
+pulumi import github:index/repository:Repository platform-demo-apps platform-demo-apps
+pulumi import github:index/repository:Repository platform-extensions platform-extensions
+```
+
+## CircleCI Pipeline (.circleci/config.yml)
+
+- Context: `PLATFORM_ADMIN` (set up in CircleCI — holds secrets for Pulumi jobs)
+- **preview** workflow: runs `pulumi-preview` on push to `main`
+- **update** workflow: runs on git tags — preview → manual approval → `pulumi-update`
+- **rollback** workflow: runs on git tags — manual approval → restores previous Pulumi stack state
+
+## Commit Signing (SSH)
+
+Branch protection requires signed commits. Setup per developer:
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_rsa.pub
+git config --global commit.gpgsign true
+```
+
+Then add the key to GitHub profile as a **Signing Key** (Settings → SSH and GPG keys → New SSH key → Key type: Signing Key).
+
+## Known Issues / Notes
+
+- Bitwarden CLI prompts for master password interactively if vault is locked — always export `BW_SESSION` before running scripts and do NOT run `bw lock` in between
+- `bw lock` invalidates `BW_SESSION` — if sync hangs, check the vault is unlocked
+- Branch protection on private org repos requires GitHub Team plan (paid) — repos are public to work around this on free plan
+- `platform-core` and other non-admin repos are empty — Chapter 2 begins work in `platform-core`
+
+## Next Step
+
+Chapter 2 — build the platform runtime codebase in `VHRAZA/platform-core`.
