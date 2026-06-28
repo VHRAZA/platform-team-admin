@@ -1,0 +1,18 @@
+# Python
+*.pyc
+__pycache__/
+venv/
+.venv/
+
+# uv
+.python-version
+
+# Pulumi
+.pulumi/
+Pulumi.*.yaml
+!Pulumi.yaml
+
+# Secrets
+.env
+secrets-setup/github_secrets.json
+

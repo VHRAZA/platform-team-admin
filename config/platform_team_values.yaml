@@ -1,0 +1,23 @@
+github_org: VHRAZA
+
+github_repositories:
+  # Chapter 1 Repos
+  - name: platform-team-admin
+    description: Repository to manage platform team membership and admin artifacts
+    visibility: public
+  - name: platform-core
+    description: Core platform runtime
+    visibility: public
+  - name: platform-demo-apps
+    description: Demo application for testing the platform
+    visibility: public
+  - name: platform-extensions
+    description: Extensions for the platform
+    visibility: public
+
+github_organization_members:
+  - name: rcodesinjavascript
+    github-role: member
+    github-username: rcodesinjavascript
+    email: rcodesinjavascript@gmail.com
+

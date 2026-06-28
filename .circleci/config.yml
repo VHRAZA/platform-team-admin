@@ -1,0 +1,72 @@
+version: 2.1
+
+globals:
+  - &context PLATFORM_ADMIN
+
+orbs:
+  pulumi: pulumi/pulumi@2.1.0
+  python: circleci/python@3.1.0
+
+on-push-main: &on-push-main
+  branches:
+    only: /main/
+  tags:
+    ignore: /.*/
+
+on-tag-main: &on-tag-main
+  branches:
+    ignore: /.*/
+  tags:
+    only: /.*/
+
+jobs:
+  pulumi-rollback:
+    docker:
+      - image: cimg/python:3.13
+    steps:
+      - checkout
+      - run:
+          name: Install Pulumi
+          command: curl -fsSL https://get.pulumi.com | sh && echo 'export PATH=$PATH:$HOME/.pulumi/bin' >> $BASH_ENV
+      - run:
+          name: Rollback to previous Pulumi state
+          command: |
+            PREV_VERSION=$(pulumi stack history --stack dev --json | python3 -c "import json,sys; h=json.load(sys.stdin); print(h[1]['version'])")
+            pulumi stack export --stack dev --version $PREV_VERSION > prev_state.json
+            pulumi stack import --stack dev < prev_state.json
+            pulumi up --stack dev --yes
+
+workflows:
+  preview:
+    jobs:
+      - pulumi-preview:
+          context: *context
+          pulumi_stack: dev
+          filters: *on-push-main
+  update:
+    jobs:
+      - pulumi-preview:
+          context: *context
+          pulumi_stack: dev
+          filters: *on-tag-main
+      - approvegithubchanges:
+          type: approval
+          requires:
+            - pulumi-preview
+          filters: *on-tag-main
+      - pulumi-update:
+          context: *context
+          pulumi_stack: dev
+          requires:
+            - approvegithubchanges
+          filters: *on-tag-main
+  rollback:
+    jobs:
+      - approve-rollback:
+          type: approval
+          filters: *on-tag-main
+      - pulumi-rollback:
+          context: *context
+          requires:
+            - approve-rollback
+          filters: *on-tag-main
